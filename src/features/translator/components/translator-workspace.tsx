@@ -12,9 +12,10 @@ import { Button } from '@/components/ui/button'
 import { FileDropzone } from '@/components/ui/file-dropzone'
 import { SectionHeading } from '@/components/ui/section-heading'
 import { APP_COPY, STATUS_LABELS } from '@/constants/app.constants'
+import { ImageOverlayPreview } from '@/features/translator/components/image-overlay-preview'
 import { terminateOcrWorker } from '@/features/translator/services/ocr.service'
 import { useTranslatorStore } from '@/features/translator/store/translator.store'
-import type { WorkflowStatus } from '@/features/translator/types'
+import type { OcrGranularity, WorkflowStatus } from '@/features/translator/types'
 import { cn } from '@/lib/cn'
 
 const statusLabelMap: Record<WorkflowStatus, string> = {
@@ -63,22 +64,40 @@ const OutputPanel = ({
 }
 
 export const TranslatorWorkspace = () => {
-  const sourceFile = useTranslatorStore((state) => state.sourceFile)
-  const ocrText = useTranslatorStore((state) => state.ocrText)
-  const translatedText = useTranslatorStore((state) => state.translatedText)
-  const status = useTranslatorStore((state) => state.status)
-  const errorMessage = useTranslatorStore((state) => state.errorMessage)
-  const metrics = useTranslatorStore((state) => state.metrics)
-  const setSourceFile = useTranslatorStore((state) => state.setSourceFile)
-  const runOcr = useTranslatorStore((state) => state.runOcr)
-  const runTranslation = useTranslatorStore((state) => state.runTranslation)
-  const clearAll = useTranslatorStore((state) => state.clearAll)
-  const setWorkflowError = useTranslatorStore((state) => state.setWorkflowError)
-  const clearError = useTranslatorStore((state) => state.clearError)
+  const {
+    sourceFile,
+    sourceImageSize,
+    ocrText,
+    translatedText,
+    ocrBlocksByGranularity,
+    overlayGranularity,
+    status,
+    errorMessage,
+    metrics,
+    setSourceFile,
+    setOverlayGranularity,
+    runOcr,
+    runTranslation,
+    clearAll,
+    setWorkflowError,
+    clearError,
+  } = useTranslatorStore((state) => state)
 
   const previewUrl = useMemo(() => {
     return sourceFile ? URL.createObjectURL(sourceFile) : null
   }, [sourceFile])
+
+  const activeOverlayBlocks = useMemo(() => {
+    return ocrBlocksByGranularity[overlayGranularity]
+  }, [ocrBlocksByGranularity, overlayGranularity])
+
+  const translatedOverlayBlocks = useMemo(() => {
+    return activeOverlayBlocks.filter((block) => block.translatedText.trim())
+  }, [activeOverlayBlocks])
+
+  const totalOcrBlockCount = useMemo(() => {
+    return ocrBlocksByGranularity.group.length + ocrBlocksByGranularity.line.length
+  }, [ocrBlocksByGranularity])
 
   useEffect(() => {
     return () => {
@@ -89,6 +108,7 @@ export const TranslatorWorkspace = () => {
   }, [previewUrl])
 
   const isRunning = status === 'running-ocr' || status === 'running-translation'
+  const canRunTranslation = ocrText.trim().length > 0 || totalOcrBlockCount > 0
 
   useEffect(() => {
     return () => {
@@ -137,7 +157,7 @@ export const TranslatorWorkspace = () => {
               onClick={() => {
                 void runTranslation()
               }}
-              disabled={isRunning || !ocrText.trim()}
+              disabled={isRunning || !canRunTranslation}
             >
               <Languages size={16} /> Translate
             </Button>
@@ -210,6 +230,48 @@ export const TranslatorWorkspace = () => {
           placeholder="Run translation to see English output here."
         />
       </div>
+
+      <Card>
+        <SectionHeading description={APP_COPY.overlayPanelDescription}>
+          {APP_COPY.overlayPanelTitle}
+        </SectionHeading>
+        <div className="mt-4 space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            {(['line', 'group'] as OcrGranularity[]).map((mode) => (
+              <Button
+                key={mode}
+                size="sm"
+                variant={overlayGranularity === mode ? 'primary' : 'secondary'}
+                onClick={() => {
+                  setOverlayGranularity(mode)
+                }}
+                disabled={isRunning}
+              >
+                {mode === 'line' ? 'Line Split Overlay' : 'Grouped Overlay'}
+              </Button>
+            ))}
+          </div>
+
+          {previewUrl ? (
+            translatedOverlayBlocks.length > 0 ? (
+              <ImageOverlayPreview
+                imageSrc={previewUrl}
+                alt="Overlay output preview"
+                originalImageSize={sourceImageSize}
+                blocks={translatedOverlayBlocks}
+              />
+            ) : (
+              <div className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-muted)] px-4 py-8 text-center text-sm text-[var(--color-text-muted)]">
+                Run <strong>Translate</strong> to render translated overlay boxes on the image.
+              </div>
+            )
+          ) : (
+            <div className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-muted)] px-4 py-8 text-center text-sm text-[var(--color-text-muted)]">
+              Upload an image, run OCR, then run translation to preview the final overlay result.
+            </div>
+          )}
+        </div>
+      </Card>
     </div>
   )
 }

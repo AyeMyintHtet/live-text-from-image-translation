@@ -1,20 +1,31 @@
 import { create } from 'zustand'
 
 import { extractJapaneseText } from '@/features/translator/services/ocr.service'
-import { translateToEnglish } from '@/features/translator/services/translation.service'
+import {
+  translateBlocksToEnglish,
+  translateToEnglish,
+} from '@/features/translator/services/translation.service'
 import type {
+  ImageDimensions,
+  OcrBlocksByGranularity,
+  OcrGranularity,
+  OcrTextBlock,
   PerformanceMetrics,
   WorkflowStatus,
 } from '@/features/translator/types'
 
 type TranslatorStore = {
   sourceFile: File | null
+  sourceImageSize: ImageDimensions | null
   ocrText: string
   translatedText: string
+  ocrBlocksByGranularity: OcrBlocksByGranularity
+  overlayGranularity: OcrGranularity
   status: WorkflowStatus
   errorMessage: string | null
   metrics: PerformanceMetrics
   setSourceFile: (file: File | null) => void
+  setOverlayGranularity: (granularity: OcrGranularity) => void
   setWorkflowError: (message: string) => void
   runOcr: () => Promise<void>
   runTranslation: () => Promise<void>
@@ -27,6 +38,26 @@ const createInitialMetrics = (): PerformanceMetrics => ({
   translationDurationMs: null,
 })
 
+const createInitialBlocksByGranularity = (): OcrBlocksByGranularity => ({
+  group: [],
+  line: [],
+})
+
+const flattenBlocks = (blocksByGranularity: OcrBlocksByGranularity): OcrTextBlock[] => {
+  return [...blocksByGranularity.group, ...blocksByGranularity.line]
+}
+
+const createInitialState = () => ({
+  sourceImageSize: null as ImageDimensions | null,
+  ocrText: '',
+  translatedText: '',
+  ocrBlocksByGranularity: createInitialBlocksByGranularity(),
+  overlayGranularity: 'line' as OcrGranularity,
+  status: 'idle' as WorkflowStatus,
+  errorMessage: null as string | null,
+  metrics: createInitialMetrics(),
+})
+
 const getErrorMessage = (error: unknown): string => {
   if (error instanceof Error && error.message) {
     return error.message
@@ -35,22 +66,27 @@ const getErrorMessage = (error: unknown): string => {
   return 'Unexpected processing error. Please try again.'
 }
 
+const mergeTranslatedBlocks = (
+  blocks: OcrTextBlock[],
+  translatedById: Map<string, string>,
+): OcrTextBlock[] => {
+  return blocks.map((block) => ({
+    ...block,
+    translatedText: translatedById.get(block.id) ?? '',
+  }))
+}
+
 export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
   sourceFile: null,
-  ocrText: '',
-  translatedText: '',
-  status: 'idle',
-  errorMessage: null,
-  metrics: createInitialMetrics(),
+  ...createInitialState(),
   setSourceFile: (file) => {
     set({
       sourceFile: file,
-      ocrText: '',
-      translatedText: '',
-      status: 'idle',
-      errorMessage: null,
-      metrics: createInitialMetrics(),
+      ...createInitialState(),
     })
+  },
+  setOverlayGranularity: (granularity) => {
+    set({ overlayGranularity: granularity })
   },
   setWorkflowError: (message) => {
     set({
@@ -70,18 +106,18 @@ export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
     }
 
     set({
+      ...createInitialState(),
       status: 'running-ocr',
-      errorMessage: null,
-      ocrText: '',
-      translatedText: '',
-      metrics: createInitialMetrics(),
+      sourceFile,
     })
 
     const startedAt = performance.now()
 
     try {
-      const ocrText = await extractJapaneseText(sourceFile)
-      if (!ocrText.trim()) {
+      const extraction = await extractJapaneseText(sourceFile)
+      const extractedBlocks = flattenBlocks(extraction.blocksByGranularity)
+
+      if (!extraction.text.trim() && extractedBlocks.length === 0) {
         set({
           status: 'failed',
           errorMessage:
@@ -91,7 +127,9 @@ export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
       }
 
       set({
-        ocrText,
+        sourceImageSize: extraction.imageSize,
+        ocrText: extraction.text,
+        ocrBlocksByGranularity: extraction.blocksByGranularity,
         status: 'completed',
         metrics: {
           ...get().metrics,
@@ -107,8 +145,10 @@ export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
   },
   runTranslation: async () => {
     const sourceText = get().ocrText
+    const sourceBlocksByGranularity = get().ocrBlocksByGranularity
+    const sourceBlocks = flattenBlocks(sourceBlocksByGranularity)
 
-    if (!sourceText.trim()) {
+    if (!sourceText.trim() && sourceBlocks.length === 0) {
       set({
         status: 'failed',
         errorMessage: 'Run OCR first to produce Japanese text before translation.',
@@ -125,10 +165,24 @@ export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
     const startedAt = performance.now()
 
     try {
-      const translatedText = await translateToEnglish(sourceText)
+      const [translatedText, translatedBlocks] = await Promise.all([
+        translateToEnglish(sourceText),
+        translateBlocksToEnglish(sourceBlocks),
+      ])
+
+      const translatedTextById = new Map(
+        translatedBlocks.map((translatedBlock) => [
+          translatedBlock.id,
+          translatedBlock.translatedText,
+        ]),
+      )
 
       set({
         translatedText,
+        ocrBlocksByGranularity: {
+          group: mergeTranslatedBlocks(sourceBlocksByGranularity.group, translatedTextById),
+          line: mergeTranslatedBlocks(sourceBlocksByGranularity.line, translatedTextById),
+        },
         status: 'completed',
         metrics: {
           ...get().metrics,
@@ -145,11 +199,7 @@ export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
   clearAll: () => {
     set({
       sourceFile: null,
-      ocrText: '',
-      translatedText: '',
-      status: 'idle',
-      errorMessage: null,
-      metrics: createInitialMetrics(),
+      ...createInitialState(),
     })
   },
   clearError: () => {
