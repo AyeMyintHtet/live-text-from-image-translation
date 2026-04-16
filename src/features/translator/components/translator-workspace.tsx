@@ -1,0 +1,215 @@
+import {
+  AlertTriangle,
+  Clock3,
+  Languages,
+  ScanText,
+  Trash2,
+} from 'lucide-react'
+import { useEffect, useMemo } from 'react'
+
+import { Card } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { FileDropzone } from '@/components/ui/file-dropzone'
+import { SectionHeading } from '@/components/ui/section-heading'
+import { APP_COPY, STATUS_LABELS } from '@/constants/app.constants'
+import { terminateOcrWorker } from '@/features/translator/services/ocr.service'
+import { useTranslatorStore } from '@/features/translator/store/translator.store'
+import type { WorkflowStatus } from '@/features/translator/types'
+import { cn } from '@/lib/cn'
+
+const statusLabelMap: Record<WorkflowStatus, string> = {
+  idle: STATUS_LABELS.idle,
+  'running-ocr': STATUS_LABELS.runningOcr,
+  'running-translation': STATUS_LABELS.runningTranslation,
+  completed: STATUS_LABELS.completed,
+  failed: STATUS_LABELS.failed,
+}
+
+const statusToneMap: Record<WorkflowStatus, string> = {
+  idle: 'border-[var(--color-border-default)] bg-[var(--color-bg-muted)] text-[var(--color-text-secondary)]',
+  'running-ocr': 'border-[var(--color-status-info)] bg-[var(--color-bg-overlay)] text-[var(--color-text-primary)]',
+  'running-translation': 'border-[var(--color-status-info)] bg-[var(--color-bg-overlay)] text-[var(--color-text-primary)]',
+  completed: 'border-[var(--color-status-success)] bg-[var(--color-bg-overlay)] text-[var(--color-text-primary)]',
+  failed: 'border-[var(--color-status-error)] bg-[var(--color-bg-overlay)] text-[var(--color-text-primary)]',
+}
+
+type OutputPanelProps = {
+  title: string
+  description: string
+  content: string
+  placeholder: string
+}
+
+const OutputPanel = ({
+  title,
+  description,
+  content,
+  placeholder,
+}: OutputPanelProps) => {
+  return (
+    <Card className="h-full">
+      <SectionHeading description={description}>{title}</SectionHeading>
+      <div className="mt-4 min-h-[300px] rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-muted)] p-4">
+        {content.trim() ? (
+          <p className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--color-text-primary)]">
+            {content}
+          </p>
+        ) : (
+          <p className="text-sm text-[var(--color-text-muted)]">{placeholder}</p>
+        )}
+      </div>
+    </Card>
+  )
+}
+
+export const TranslatorWorkspace = () => {
+  const sourceFile = useTranslatorStore((state) => state.sourceFile)
+  const ocrText = useTranslatorStore((state) => state.ocrText)
+  const translatedText = useTranslatorStore((state) => state.translatedText)
+  const status = useTranslatorStore((state) => state.status)
+  const errorMessage = useTranslatorStore((state) => state.errorMessage)
+  const metrics = useTranslatorStore((state) => state.metrics)
+  const setSourceFile = useTranslatorStore((state) => state.setSourceFile)
+  const runOcr = useTranslatorStore((state) => state.runOcr)
+  const runTranslation = useTranslatorStore((state) => state.runTranslation)
+  const clearAll = useTranslatorStore((state) => state.clearAll)
+  const setWorkflowError = useTranslatorStore((state) => state.setWorkflowError)
+  const clearError = useTranslatorStore((state) => state.clearError)
+
+  const previewUrl = useMemo(() => {
+    return sourceFile ? URL.createObjectURL(sourceFile) : null
+  }, [sourceFile])
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl)
+      }
+    }
+  }, [previewUrl])
+
+  const isRunning = status === 'running-ocr' || status === 'running-translation'
+
+  useEffect(() => {
+    return () => {
+      void terminateOcrWorker()
+    }
+  }, [])
+
+  return (
+    <div className="space-y-6">
+      <Card tone="muted" className="border-[var(--color-border-strong)]">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <p className="text-sm text-[var(--color-text-secondary)]">{APP_COPY.productTagline}</p>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <span
+                className={cn(
+                  'inline-flex rounded-full border px-3 py-1 text-xs font-semibold',
+                  statusToneMap[status],
+                )}
+              >
+                {statusLabelMap[status]}
+              </span>
+              {metrics.ocrDurationMs ? (
+                <span className="inline-flex items-center gap-1 rounded-full border border-[var(--color-border-default)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">
+                  <Clock3 size={13} /> OCR {metrics.ocrDurationMs} ms
+                </span>
+              ) : null}
+              {metrics.translationDurationMs ? (
+                <span className="inline-flex items-center gap-1 rounded-full border border-[var(--color-border-default)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">
+                  <Clock3 size={13} /> Translation {metrics.translationDurationMs} ms
+                </span>
+              ) : null}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              onClick={() => {
+                void runOcr()
+              }}
+              disabled={isRunning || !sourceFile}
+            >
+              <ScanText size={16} /> Run OCR
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                void runTranslation()
+              }}
+              disabled={isRunning || !ocrText.trim()}
+            >
+              <Languages size={16} /> Translate
+            </Button>
+            <Button variant="ghost" onClick={clearAll} disabled={isRunning}>
+              <Trash2 size={16} /> Reset
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      {errorMessage ? (
+        <Card className="border-[var(--color-status-error)] bg-[var(--color-bg-overlay)]">
+          <div className="flex items-start justify-between gap-3">
+            <p className="flex items-start gap-2 text-sm text-[var(--color-text-primary)]">
+              <AlertTriangle size={16} className="mt-0.5 text-[var(--color-status-error)]" />
+              <span>{errorMessage}</span>
+            </p>
+            <Button variant="ghost" size="sm" onClick={clearError}>
+              Dismiss
+            </Button>
+          </div>
+        </Card>
+      ) : null}
+
+      <div className="grid gap-6 lg:grid-cols-[1.1fr_1fr_1fr]">
+        <Card className="h-full">
+          <SectionHeading description={APP_COPY.sourcePanelDescription}>
+            {APP_COPY.sourcePanelTitle}
+          </SectionHeading>
+          <div className="mt-4 space-y-4">
+            <FileDropzone
+              selectedFile={sourceFile}
+              onFileSelected={(file) => {
+                setSourceFile(file)
+              }}
+              onValidationError={(message) => {
+                setSourceFile(null)
+                setWorkflowError(message)
+              }}
+              disabled={isRunning}
+            />
+
+            {previewUrl ? (
+              <div className="overflow-hidden rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-muted)]">
+                <img
+                  src={previewUrl}
+                  alt="Selected source"
+                  className="h-auto w-full object-contain"
+                />
+              </div>
+            ) : (
+              <div className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-muted)] px-4 py-8 text-center text-sm text-[var(--color-text-muted)]">
+                Preview appears here after selecting an image.
+              </div>
+            )}
+          </div>
+        </Card>
+
+        <OutputPanel
+          title={APP_COPY.ocrPanelTitle}
+          description={APP_COPY.ocrPanelDescription}
+          content={ocrText}
+          placeholder="Run OCR to see extracted Japanese text here."
+        />
+
+        <OutputPanel
+          title={APP_COPY.translationPanelTitle}
+          description={APP_COPY.translationPanelDescription}
+          content={translatedText}
+          placeholder="Run translation to see English output here."
+        />
+      </div>
+    </div>
+  )
+}
