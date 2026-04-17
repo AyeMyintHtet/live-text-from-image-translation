@@ -11,11 +11,11 @@ import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { FileDropzone } from '@/components/ui/file-dropzone'
 import { SectionHeading } from '@/components/ui/section-heading'
-import { APP_COPY, STATUS_LABELS } from '@/constants/app.constants'
+import { APP_COPY, OCR_LANGUAGE_OPTIONS, STATUS_LABELS } from '@/constants/app.constants'
 import { ImageOverlayPreview } from '@/features/translator/components/image-overlay-preview'
 import { terminateOcrWorker } from '@/features/translator/services/ocr.service'
 import { useTranslatorStore } from '@/features/translator/store/translator.store'
-import type { OcrGranularity, WorkflowStatus } from '@/features/translator/types'
+import type { OcrGranularity, OcrLanguage, WorkflowStatus } from '@/features/translator/types'
 import { cn } from '@/lib/cn'
 
 const statusLabelMap: Record<WorkflowStatus, string> = {
@@ -70,11 +70,15 @@ export const TranslatorWorkspace = () => {
     ocrText,
     translatedText,
     ocrBlocksByGranularity,
+    ocrLanguage,
+    useHighContrastPreprocessing,
     overlayGranularity,
     status,
     errorMessage,
     metrics,
     setSourceFile,
+    setOcrLanguage,
+    setUseHighContrastPreprocessing,
     setOverlayGranularity,
     runOcr,
     runTranslation,
@@ -94,6 +98,10 @@ export const TranslatorWorkspace = () => {
   const translatedOverlayBlocks = useMemo(() => {
     return activeOverlayBlocks.filter((block) => block.translatedText.trim())
   }, [activeOverlayBlocks])
+
+  const selectedLanguageLabel = useMemo(() => {
+    return OCR_LANGUAGE_OPTIONS.find((option) => option.value === ocrLanguage)?.label ?? 'OCR'
+  }, [ocrLanguage])
 
   const totalOcrBlockCount = useMemo(() => {
     return ocrBlocksByGranularity.group.length + ocrBlocksByGranularity.line.length
@@ -119,7 +127,7 @@ export const TranslatorWorkspace = () => {
   return (
     <div className="space-y-6">
       <Card tone="muted" className="border-[var(--color-border-strong)]">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <p className="text-sm text-[var(--color-text-secondary)]">{APP_COPY.productTagline}</p>
             <div className="mt-3 flex flex-wrap items-center gap-3">
@@ -143,27 +151,62 @@ export const TranslatorWorkspace = () => {
               ) : null}
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              onClick={() => {
-                void runOcr()
-              }}
-              disabled={isRunning || !sourceFile}
-            >
-              <ScanText size={16} /> Run OCR
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={() => {
-                void runTranslation()
-              }}
-              disabled={isRunning || !canRunTranslation}
-            >
-              <Languages size={16} /> Translate
-            </Button>
-            <Button variant="ghost" onClick={clearAll} disabled={isRunning}>
-              <Trash2 size={16} /> Reset
-            </Button>
+          <div className="flex flex-col items-stretch gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex min-w-[230px] flex-col gap-1">
+                <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--color-text-muted)]">
+                  OCR Language
+                </span>
+                <select
+                  value={ocrLanguage}
+                  onChange={(event) => {
+                    setOcrLanguage(event.target.value as OcrLanguage)
+                  }}
+                  disabled={isRunning}
+                  className="h-10 rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-overlay)] px-3 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-border-strong)]"
+                >
+                  {OCR_LANGUAGE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="inline-flex h-10 items-center gap-2 rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-overlay)] px-3 text-sm text-[var(--color-text-primary)]">
+                <input
+                  type="checkbox"
+                  checked={useHighContrastPreprocessing}
+                  onChange={(event) => {
+                    setUseHighContrastPreprocessing(event.target.checked)
+                  }}
+                  disabled={isRunning}
+                  className="h-4 w-4"
+                />
+                High contrast before OCR
+              </label>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                onClick={() => {
+                  void runOcr()
+                }}
+                disabled={isRunning || !sourceFile}
+              >
+                <ScanText size={16} /> Run OCR
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  void runTranslation()
+                }}
+                disabled={isRunning || !canRunTranslation}
+              >
+                <Languages size={16} /> Translate
+              </Button>
+              <Button variant="ghost" onClick={clearAll} disabled={isRunning}>
+                <Trash2 size={16} /> Reset
+              </Button>
+            </div>
           </div>
         </div>
       </Card>
@@ -218,9 +261,9 @@ export const TranslatorWorkspace = () => {
 
         <OutputPanel
           title={APP_COPY.ocrPanelTitle}
-          description={APP_COPY.ocrPanelDescription}
+          description={`${APP_COPY.ocrPanelDescription} Current: ${selectedLanguageLabel}.`}
           content={ocrText}
-          placeholder="Run OCR to see extracted Japanese text here."
+          placeholder="Run OCR to see extracted text here."
         />
 
         <OutputPanel

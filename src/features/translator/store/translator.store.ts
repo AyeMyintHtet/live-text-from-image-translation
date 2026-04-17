@@ -1,6 +1,10 @@
 import { create } from 'zustand'
 
-import { extractJapaneseText } from '@/features/translator/services/ocr.service'
+import {
+  DEFAULT_OCR_LANGUAGE,
+  DEFAULT_USE_HIGH_CONTRAST_PREPROCESSING,
+} from '@/constants/app.constants'
+import { extractTextFromImage } from '@/features/translator/services/ocr.service'
 import {
   translateBlocksToEnglish,
   translateToEnglish,
@@ -9,6 +13,7 @@ import type {
   ImageDimensions,
   OcrBlocksByGranularity,
   OcrGranularity,
+  OcrLanguage,
   OcrTextBlock,
   PerformanceMetrics,
   WorkflowStatus,
@@ -20,11 +25,15 @@ type TranslatorStore = {
   ocrText: string
   translatedText: string
   ocrBlocksByGranularity: OcrBlocksByGranularity
+  ocrLanguage: OcrLanguage
+  useHighContrastPreprocessing: boolean
   overlayGranularity: OcrGranularity
   status: WorkflowStatus
   errorMessage: string | null
   metrics: PerformanceMetrics
   setSourceFile: (file: File | null) => void
+  setOcrLanguage: (language: OcrLanguage) => void
+  setUseHighContrastPreprocessing: (enabled: boolean) => void
   setOverlayGranularity: (granularity: OcrGranularity) => void
   setWorkflowError: (message: string) => void
   runOcr: () => Promise<void>
@@ -78,11 +87,27 @@ const mergeTranslatedBlocks = (
 
 export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
   sourceFile: null,
+  ocrLanguage: DEFAULT_OCR_LANGUAGE,
+  useHighContrastPreprocessing: DEFAULT_USE_HIGH_CONTRAST_PREPROCESSING,
   ...createInitialState(),
   setSourceFile: (file) => {
     set({
       sourceFile: file,
       ...createInitialState(),
+    })
+  },
+  setOcrLanguage: (language) => {
+    set({
+      ocrLanguage: language,
+      ...createInitialState(),
+      sourceFile: get().sourceFile,
+    })
+  },
+  setUseHighContrastPreprocessing: (enabled) => {
+    set({
+      useHighContrastPreprocessing: enabled,
+      ...createInitialState(),
+      sourceFile: get().sourceFile,
     })
   },
   setOverlayGranularity: (granularity) => {
@@ -96,6 +121,8 @@ export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
   },
   runOcr: async () => {
     const sourceFile = get().sourceFile
+    const ocrLanguage = get().ocrLanguage
+    const useHighContrastPreprocessing = get().useHighContrastPreprocessing
 
     if (!sourceFile) {
       set({
@@ -114,7 +141,10 @@ export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
     const startedAt = performance.now()
 
     try {
-      const extraction = await extractJapaneseText(sourceFile)
+      const extraction = await extractTextFromImage(sourceFile, {
+        language: ocrLanguage,
+        useHighContrastPreprocessing,
+      })
       const extractedBlocks = flattenBlocks(extraction.blocksByGranularity)
 
       if (!extraction.text.trim() && extractedBlocks.length === 0) {
@@ -147,11 +177,15 @@ export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
     const sourceText = get().ocrText
     const sourceBlocksByGranularity = get().ocrBlocksByGranularity
     const sourceBlocks = flattenBlocks(sourceBlocksByGranularity)
+    const fallbackBlockText = sourceBlocks
+      .map((block) => block.sourceText)
+      .join('\n')
+    const sourceTextForTranslation = sourceText.trim() || fallbackBlockText.trim()
 
-    if (!sourceText.trim() && sourceBlocks.length === 0) {
+    if (!sourceTextForTranslation && sourceBlocks.length === 0) {
       set({
         status: 'failed',
-        errorMessage: 'Run OCR first to produce Japanese text before translation.',
+        errorMessage: 'Run OCR first to produce source text before translation.',
       })
       return
     }
@@ -166,7 +200,7 @@ export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
 
     try {
       const [translatedText, translatedBlocks] = await Promise.all([
-        translateToEnglish(sourceText),
+        translateToEnglish(sourceTextForTranslation),
         translateBlocksToEnglish(sourceBlocks),
       ])
 

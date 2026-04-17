@@ -1,16 +1,26 @@
-import { createWorker, OEM, type Worker } from 'tesseract.js'
+import { createWorker, OEM, PSM, type Worker } from 'tesseract.js'
 
-import { OCR_LANGUAGE } from '@/constants/app.constants'
+import {
+  DEFAULT_OCR_LANGUAGE,
+  DEFAULT_USE_HIGH_CONTRAST_PREPROCESSING,
+  OCR_LANGUAGE_OPTIONS,
+} from '@/constants/app.constants'
 import type {
   BoundingBox,
   ImageDimensions,
   OcrBlocksByGranularity,
   OcrExtractionResult,
   OcrGranularity,
+  OcrLanguage,
   OcrTextBlock,
 } from '@/features/translator/types'
 
-let workerPromise: Promise<Worker> | null = null
+const workerPromisesByLanguage = new Map<string, Promise<Worker>>()
+
+export type OcrProcessingOptions = {
+  language: OcrLanguage
+  useHighContrastPreprocessing: boolean
+}
 
 type OcrCandidate = {
   label: string
@@ -21,6 +31,7 @@ type OcrCandidate = {
 
 type OcrCandidateResult = {
   label: string
+  presetLabel: string
   text: string
   confidence: number
   blocksByGranularity: OcrBlocksByGranularity
@@ -63,27 +74,115 @@ type TesseractBlock = {
 
 type RawOcrTextBlock = Omit<OcrTextBlock, 'id' | 'translatedText'>
 
+type RecognizePreset = {
+  label: string
+  options: Record<string, string>
+}
+
+type OcrLanguageProfile = {
+  tesseractLanguage: string
+  usesEnglish: boolean
+  usesJapanese: boolean
+  recognizePresets: RecognizePreset[]
+}
+
 const MIN_OCR_WIDTH = 1600
 const MIN_OCR_HEIGHT = 1200
-const MAX_SCALE_FACTOR = 5
+const MAX_SCALE_FACTOR = 9
 const MIN_BLOCK_WIDTH = 12
 const MIN_BLOCK_HEIGHT = 12
 const MIN_WORD_COUNT_FOR_CLUSTERING = 2
+
+const ENGLISH_CHAR_WHITELIST =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,!?':;\"()-"
+
+const toLanguageCodes = (languageCode: string): string[] => {
+  return languageCode
+    .split('+')
+    .map((code) => code.trim().toLowerCase())
+    .filter(Boolean)
+}
+
+const hasLanguageCode = (languageCode: string, code: string): boolean => {
+  return toLanguageCodes(languageCode).includes(code)
+}
+
+const resolveTesseractLanguage = (language: OcrLanguage): string => {
+  const option = OCR_LANGUAGE_OPTIONS.find((candidate) => candidate.value === language)
+  if (option) {
+    return option.tesseractLanguage
+  }
+
+  const fallbackOption = OCR_LANGUAGE_OPTIONS.find(
+    (candidate) => candidate.value === DEFAULT_OCR_LANGUAGE,
+  )
+  return fallbackOption?.tesseractLanguage ?? 'eng'
+}
+
+const toLanguageProfile = (language: OcrLanguage): OcrLanguageProfile => {
+  const tesseractLanguage = resolveTesseractLanguage(language)
+  const usesEnglish = hasLanguageCode(tesseractLanguage, 'eng')
+  const baseOptions: Record<string, string> = {
+    preserve_interword_spaces: '1',
+    ...(usesEnglish
+      ? {
+          tessedit_char_whitelist: ENGLISH_CHAR_WHITELIST,
+        }
+      : {}),
+  }
+
+  return {
+    tesseractLanguage,
+    usesEnglish,
+    usesJapanese:
+      hasLanguageCode(tesseractLanguage, 'jpn') || hasLanguageCode(tesseractLanguage, 'jpn_vert'),
+    recognizePresets: [
+      {
+        label: 'sparse',
+        options: {
+          ...baseOptions,
+          tessedit_pageseg_mode: String(PSM.SPARSE_TEXT),
+        },
+      },
+      {
+        label: 'auto',
+        options: {
+          ...baseOptions,
+          tessedit_pageseg_mode: String(PSM.AUTO),
+        },
+      },
+      ...(usesEnglish
+        ? [
+            {
+              label: 'single-column',
+              options: {
+                ...baseOptions,
+                tessedit_pageseg_mode: String(PSM.SINGLE_COLUMN),
+              },
+            },
+          ]
+        : []),
+    ],
+  }
+}
 
 const OCR_OUTPUT_OPTIONS = {
   text: true,
   blocks: true,
 } as const
 
-const OCR_WORKER_OPTIONS = {
-  // Use full core to avoid noisy "Parameter not found" warnings emitted by LSTM-only core.
-  // OCR mode remains LSTM_ONLY for speed/accuracy balance.
-  legacyCore: true,
-} as const
+const getWorker = (tesseractLanguage: string): Promise<Worker> => {
+  const existingWorkerPromise = workerPromisesByLanguage.get(tesseractLanguage)
+  if (existingWorkerPromise) {
+    return existingWorkerPromise
+  }
 
-const getWorker = (): Promise<Worker> => {
-  workerPromise ??= createWorker(OCR_LANGUAGE, OEM.LSTM_ONLY, OCR_WORKER_OPTIONS)
-  return workerPromise
+  const createdWorkerPromise = createWorker(tesseractLanguage, OEM.LSTM_ONLY).catch((error) => {
+    workerPromisesByLanguage.delete(tesseractLanguage)
+    throw error
+  })
+  workerPromisesByLanguage.set(tesseractLanguage, createdWorkerPromise)
+  return createdWorkerPromise
 }
 
 const normalizeExtractedText = (text: string): string => {
@@ -155,6 +254,7 @@ const loadImageFromFile = (file: File): Promise<HTMLImageElement> => {
 
 const createUpscaledCanvas = (
   image: HTMLImageElement,
+  smoothUpscale: boolean,
 ): {
   canvas: HTMLCanvasElement
   scaleFactor: number
@@ -172,8 +272,8 @@ const createUpscaledCanvas = (
   canvas.width = Math.max(1, Math.round(image.width * scaleFactor))
   canvas.height = Math.max(1, Math.round(image.height * scaleFactor))
 
-  context.imageSmoothingEnabled = true
-  context.imageSmoothingQuality = 'high'
+  context.imageSmoothingEnabled = smoothUpscale
+  context.imageSmoothingQuality = smoothUpscale ? 'high' : 'low'
   context.drawImage(image, 0, 0, canvas.width, canvas.height)
 
   return {
@@ -326,11 +426,124 @@ const toMedian = (values: number[]): number => {
   return sorted[center]
 }
 
+const toEnglishTokens = (text: string): string[] => {
+  return text
+    .split(/\s+/)
+    .map((token) => token.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, ''))
+    .filter(Boolean)
+}
+
+const isEnglishLexicalToken = (token: string): boolean => {
+  return /^[A-Za-z]+(?:['-][A-Za-z]+)*$/.test(token)
+}
+
+const isConsonantOnlyToken = (token: string): boolean => {
+  return /^[BCDFGHJKLMNPQRSTVWXYZ]{3,}$/i.test(token)
+}
+
+const toEnglishLetterCount = (text: string): number => {
+  return (text.match(/[A-Za-z]/g) ?? []).length
+}
+
+const toEnglishNoiseSymbolCount = (text: string): number => {
+  return (text.match(/[^A-Za-z0-9\s.,!?'"():;-]/g) ?? []).length
+}
+
+const hasSuspiciousCharacterRepeat = (text: string): boolean => {
+  const compact = text.replace(/[^A-Za-z0-9]/g, '')
+  return compact.length >= 3 && /(.)\1{2,}/i.test(compact)
+}
+
+const toEnglishTextQualityScore = (text: string): number => {
+  const normalizedText = normalizeExtractedText(text)
+  if (!normalizedText) {
+    return -120
+  }
+
+  const compactLength = toCompactTextLength(normalizedText)
+  if (compactLength === 0) {
+    return -120
+  }
+
+  const letterCount = toEnglishLetterCount(normalizedText)
+  const noiseSymbolCount = toEnglishNoiseSymbolCount(normalizedText)
+  const letterRatio = letterCount / compactLength
+  const noiseRatio = noiseSymbolCount / compactLength
+  const tokens = toEnglishTokens(normalizedText)
+  const lexicalTokens = tokens.filter((token) => /[A-Za-z]/.test(token))
+  const readableTokens = lexicalTokens.filter((token) => isEnglishLexicalToken(token))
+  const readableRatio =
+    lexicalTokens.length > 0 ? readableTokens.length / lexicalTokens.length : 0
+  const shortTokenCount = lexicalTokens.filter((token) => token.length === 1).length
+  const longTokenCount = lexicalTokens.filter((token) => token.length >= 15).length
+  const consonantOnlyPenalty = lexicalTokens.filter((token) => isConsonantOnlyToken(token))
+    .length
+
+  return (
+    letterRatio * 95 +
+    readableRatio * 85 +
+    Math.min(readableTokens.length, 28) * 2 -
+    noiseRatio * 150 -
+    shortTokenCount * 1.2 -
+    longTokenCount * 4 -
+    consonantOnlyPenalty * 3
+  )
+}
+
+const toSingleCharacterTokenCount = (text: string): number => {
+  return toEnglishTokens(text).filter((token) => /^[A-Za-z]$/.test(token)).length
+}
+
+const isLikelyEnglishTextBlock = (text: string, confidence: number): boolean => {
+  const normalizedText = normalizeExtractedText(text)
+  if (!normalizedText) {
+    return false
+  }
+
+  const compactLength = toCompactTextLength(normalizedText)
+  if (compactLength <= 2) {
+    return /^[A-Za-z0-9]{1,2}$/.test(normalizedText)
+  }
+
+  const letterCount = toEnglishLetterCount(normalizedText)
+  const noiseSymbolCount = toEnglishNoiseSymbolCount(normalizedText)
+  const letterRatio = letterCount / compactLength
+  const noiseRatio = noiseSymbolCount / compactLength
+  const tokens = toEnglishTokens(normalizedText)
+  const lexicalTokens = tokens.filter((token) => /[A-Za-z]/.test(token))
+  const readableTokens = lexicalTokens.filter((token) => isEnglishLexicalToken(token))
+  const readableRatio =
+    lexicalTokens.length > 0 ? readableTokens.length / lexicalTokens.length : 1
+
+  if (confidence < 20 && compactLength < 6) {
+    return false
+  }
+
+  if (hasSuspiciousCharacterRepeat(normalizedText) && compactLength <= 8) {
+    return false
+  }
+
+  if (letterRatio < 0.35 || noiseRatio > 0.2) {
+    return false
+  }
+
+  if (lexicalTokens.length === 1 && isConsonantOnlyToken(lexicalTokens[0])) {
+    return false
+  }
+
+  if (lexicalTokens.length >= 3 && readableRatio < 0.45) {
+    return false
+  }
+
+  return toEnglishTextQualityScore(normalizedText) > 10
+}
+
 const toRawBlock = (
   sourceText: string,
   confidence: number,
   bbox: BoundingBox,
   unitLevel: OcrGranularity,
+  languageProfile: OcrLanguageProfile,
 ): RawOcrTextBlock | null => {
   const normalizedText = normalizeExtractedText(sourceText)
 
@@ -338,9 +551,13 @@ const toRawBlock = (
     return null
   }
 
+  if (languageProfile.usesEnglish && !isLikelyEnglishTextBlock(normalizedText, confidence)) {
+    return null
+  }
+
   return {
     sourceText: normalizedText,
-    confidence,
+    confidence: clamp(confidence, 0, 100),
     bbox,
     unitLevel,
   }
@@ -350,6 +567,7 @@ const toLineBlocks = (
   blocks: TesseractBlock[],
   preprocessingScale: number,
   imageSize: ImageDimensions,
+  languageProfile: OcrLanguageProfile,
 ): RawOcrTextBlock[] => {
   const extractedBlocks: RawOcrTextBlock[] = []
 
@@ -425,7 +643,9 @@ const toLineBlocks = (
           toOriginalBbox(word.bbox, preprocessingScale, imageSize),
         ),
       )
-      const clusterText = clusterWords.map((word) => word.text).join('')
+      const clusterText = clusterWords
+        .map((word) => word.text)
+        .join(languageProfile.usesEnglish ? ' ' : '')
       const clusterConfidence = toMedian(clusterWords.map((word) => word.confidence))
 
       const rawBlock = toRawBlock(
@@ -433,6 +653,7 @@ const toLineBlocks = (
         clusterConfidence,
         clusterBbox,
         'line',
+        languageProfile,
       )
 
       if (rawBlock) {
@@ -462,6 +683,7 @@ const toLineBlocks = (
           line.confidence,
           toOriginalBbox(line.bbox, preprocessingScale, imageSize),
           'line',
+          languageProfile,
         )
 
         if (rawBlock) {
@@ -478,6 +700,7 @@ const toGroupBlocks = (
   blocks: TesseractBlock[],
   preprocessingScale: number,
   imageSize: ImageDimensions,
+  languageProfile: OcrLanguageProfile,
 ): RawOcrTextBlock[] => {
   const extractedBlocks: RawOcrTextBlock[] = []
 
@@ -499,6 +722,7 @@ const toGroupBlocks = (
         paragraph.confidence,
         paragraphBbox,
         'group',
+        languageProfile,
       )
 
       if (rawBlock) {
@@ -515,6 +739,7 @@ const toFallbackBlockLevelBlocks = (
   preprocessingScale: number,
   imageSize: ImageDimensions,
   unitLevel: OcrGranularity,
+  languageProfile: OcrLanguageProfile,
 ): RawOcrTextBlock[] => {
   return blocks
     .map((block) => {
@@ -523,6 +748,7 @@ const toFallbackBlockLevelBlocks = (
         block.confidence,
         toOriginalBbox(block.bbox, preprocessingScale, imageSize),
         unitLevel,
+        languageProfile,
       )
     })
     .filter((block): block is RawOcrTextBlock => Boolean(block))
@@ -548,50 +774,187 @@ const normalizeBlocks = (
     }))
 }
 
-const toCandidateScore = (result: OcrCandidateResult): number => {
+const toAverageBlockConfidence = (blocks: OcrTextBlock[]): number => {
+  if (blocks.length === 0) {
+    return 0
+  }
+
+  const totalConfidence = blocks.reduce((sum, block) => sum + block.confidence, 0)
+  return totalConfidence / blocks.length
+}
+
+const toDisplayText = (
+  blocksByGranularity: OcrBlocksByGranularity,
+  fallbackText: string,
+  languageProfile: OcrLanguageProfile,
+): string => {
+  const groupText = normalizeExtractedText(
+    blocksByGranularity.group.map((block) => block.sourceText).join('\n'),
+  )
+  const lineText = normalizeExtractedText(
+    blocksByGranularity.line.map((block) => block.sourceText).join('\n'),
+  )
+
+  if (languageProfile.usesEnglish) {
+    if (groupText && lineText) {
+      return toEnglishTextQualityScore(groupText) >= toEnglishTextQualityScore(lineText)
+        ? groupText
+        : lineText
+    }
+
+    if (groupText) {
+      return groupText
+    }
+
+    if (lineText) {
+      return lineText
+    }
+  } else {
+    const prioritizedText = groupText || lineText
+    if (prioritizedText) {
+      return prioritizedText
+    }
+  }
+
+  const normalizedFallbackText = normalizeExtractedText(fallbackText)
+
+  if (languageProfile.usesEnglish && normalizedFallbackText) {
+    const filteredFallback = normalizeExtractedText(
+      normalizedFallbackText
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .filter((line) => isLikelyEnglishTextBlock(line, 100))
+        .join('\n'),
+    )
+
+    if (filteredFallback) {
+      return filteredFallback
+    }
+  }
+
+  return normalizedFallbackText
+}
+
+const toCompactTextLength = (text: string): number => {
+  return text.replace(/\s+/g, '').length
+}
+
+const toJapaneseCharacterCount = (text: string): number => {
+  return (text.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9faf]/g) ?? []).length
+}
+
+const toCandidateSourceBoost = (
+  label: string,
+  languageProfile: OcrLanguageProfile,
+): number => {
+  if (languageProfile.usesEnglish) {
+    switch (label) {
+      case 'upscaled-crisp':
+        return 4
+      case 'original':
+        return 2
+      case 'high-contrast':
+        return -4
+      default:
+        return 0
+    }
+  }
+
+  switch (label) {
+    case 'high-contrast':
+      return 6
+    case 'upscaled-crisp':
+      return 2
+    case 'original':
+      return 1
+    default:
+      return 0
+  }
+}
+
+const toPresetScoreBoost = (presetLabel: string): number => {
+  switch (presetLabel) {
+    case 'sparse':
+      return 4
+    case 'auto':
+      return 2
+    default:
+      return 0
+  }
+}
+
+const toCandidateScore = (
+  result: OcrCandidateResult,
+  languageProfile: OcrLanguageProfile,
+): number => {
   const representativeBlocks =
     result.blocksByGranularity.group.length > 0
       ? result.blocksByGranularity.group
       : result.blocksByGranularity.line
 
-  const textLengthBoost = Math.min(result.text.length, 160) * 0.35
-  const japaneseScriptBoost = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9faf]/.test(result.text)
-    ? 20
-    : 0
-  const blockCountBoost = Math.min(representativeBlocks.length, 20) * 4
+  const compactLength = toCompactTextLength(result.text)
+  const languageTextBoost = languageProfile.usesEnglish
+    ? toEnglishTextQualityScore(result.text)
+    : languageProfile.usesJapanese
+      ? toJapaneseCharacterCount(result.text) * 2
+      : 0
+  const textLengthBoost = Math.min(compactLength, 280) * 0.45
+  const blockCountBoost =
+    Math.min(representativeBlocks.length, 24) * (languageProfile.usesEnglish ? 2.2 : 4)
+  const averageBlockConfidenceBoost = toAverageBlockConfidence(representativeBlocks) * 0.5
   const blockCoverageBoost = Math.min(
     representativeBlocks.reduce((total, block) => total + toBlockArea(block.bbox), 0) /
       (result.imageSize.width * result.imageSize.height || 1),
-    0.55,
-  ) * 100
+    languageProfile.usesEnglish ? 0.5 : 0.6,
+  ) * (languageProfile.usesEnglish ? 24 : 70)
+  const blockQualityBoost = languageProfile.usesEnglish
+    ? representativeBlocks.reduce(
+        (sum, block) => sum + Math.max(0, toEnglishTextQualityScore(block.sourceText)),
+        0,
+      ) /
+      (representativeBlocks.length || 1) *
+      0.35
+    : 0
+  const presetBoost = toPresetScoreBoost(result.presetLabel)
+  const candidateSourceBoost = toCandidateSourceBoost(result.label, languageProfile)
+  const emptyTextPenalty = compactLength === 0 ? 120 : 0
+  const singleCharacterPenalty = languageProfile.usesEnglish
+    ? representativeBlocks.reduce(
+        (sum, block) => sum + toSingleCharacterTokenCount(block.sourceText),
+        0,
+      ) * 2.8
+    : 0
 
   return (
     result.confidence +
     textLengthBoost +
-    japaneseScriptBoost +
+    languageTextBoost +
     blockCountBoost +
-    blockCoverageBoost
+    averageBlockConfidenceBoost +
+    blockCoverageBoost +
+    blockQualityBoost +
+    presetBoost +
+    candidateSourceBoost -
+    singleCharacterPenalty -
+    emptyTextPenalty
   )
 }
 
-const buildOcrCandidates = async (file: File): Promise<OcrCandidate[]> => {
+const buildOcrCandidates = async (
+  file: File,
+  useHighContrastPreprocessing: boolean,
+): Promise<OcrCandidate[]> => {
   const image = await loadImageFromFile(file)
   const originalImageSize: ImageDimensions = {
     width: image.width,
     height: image.height,
   }
 
-  const { canvas: upscaled, scaleFactor } = createUpscaledCanvas(image)
-  const highContrast = toHighContrast(upscaled, false)
-  const invertedContrast = toHighContrast(upscaled, true)
+  const { canvas: upscaledCrisp, scaleFactor } = createUpscaledCanvas(image, false)
+  const upscaledCrispFile = await canvasToFile(upscaledCrisp, `${file.name}-upscaled-crisp.png`)
 
-  const [upscaledFile, highContrastFile, invertedFile] = await Promise.all([
-    canvasToFile(upscaled, `${file.name}-upscaled.png`),
-    canvasToFile(highContrast, `${file.name}-high-contrast.png`),
-    canvasToFile(invertedContrast, `${file.name}-high-contrast-inverted.png`),
-  ])
-
-  return [
+  const candidates: OcrCandidate[] = [
     {
       label: 'original',
       file,
@@ -599,85 +962,116 @@ const buildOcrCandidates = async (file: File): Promise<OcrCandidate[]> => {
       originalImageSize,
     },
     {
-      label: 'upscaled',
-      file: upscaledFile,
+      label: 'upscaled-crisp',
+      file: upscaledCrispFile,
       preprocessingScale: scaleFactor,
       originalImageSize,
     },
+  ]
+
+  if (!useHighContrastPreprocessing) {
+    return candidates
+  }
+
+  const highContrast = toHighContrast(upscaledCrisp, false)
+  const highContrastFile = await canvasToFile(highContrast, `${file.name}-high-contrast.png`)
+
+  return [
+    ...candidates,
     {
       label: 'high-contrast',
       file: highContrastFile,
       preprocessingScale: scaleFactor,
       originalImageSize,
     },
-    {
-      label: 'high-contrast-inverted',
-      file: invertedFile,
-      preprocessingScale: scaleFactor,
-      originalImageSize,
-    },
   ]
 }
 
-export const extractJapaneseText = async (
+const resolveProcessingOptions = (
+  options?: Partial<OcrProcessingOptions>,
+): OcrProcessingOptions => {
+  return {
+    language: options?.language ?? DEFAULT_OCR_LANGUAGE,
+    useHighContrastPreprocessing:
+      options?.useHighContrastPreprocessing ?? DEFAULT_USE_HIGH_CONTRAST_PREPROCESSING,
+  }
+}
+
+export const extractTextFromImage = async (
   file: File,
+  options?: Partial<OcrProcessingOptions>,
 ): Promise<OcrExtractionResult> => {
-  const worker = await getWorker()
-  const candidates = await buildOcrCandidates(file)
+  const processingOptions = resolveProcessingOptions(options)
+  const languageProfile = toLanguageProfile(processingOptions.language)
+  const worker = await getWorker(languageProfile.tesseractLanguage)
+  const candidates = await buildOcrCandidates(file, processingOptions.useHighContrastPreprocessing)
 
   const results: OcrCandidateResult[] = []
 
   for (const candidate of candidates) {
-    const { data } = await worker.recognize(candidate.file, {}, OCR_OUTPUT_OPTIONS)
-    const blocks = (data.blocks ?? []) as TesseractBlock[]
+    for (const preset of languageProfile.recognizePresets) {
+      const { data } = await worker.recognize(candidate.file, preset.options, OCR_OUTPUT_OPTIONS)
+      const blocks = (data.blocks ?? []) as TesseractBlock[]
 
-    const rawGroupBlocks = toGroupBlocks(
-      blocks,
-      candidate.preprocessingScale,
-      candidate.originalImageSize,
-    )
+      const rawGroupBlocks = toGroupBlocks(
+        blocks,
+        candidate.preprocessingScale,
+        candidate.originalImageSize,
+        languageProfile,
+      )
 
-    const rawLineBlocks = toLineBlocks(
-      blocks,
-      candidate.preprocessingScale,
-      candidate.originalImageSize,
-    )
+      const rawLineBlocks = toLineBlocks(
+        blocks,
+        candidate.preprocessingScale,
+        candidate.originalImageSize,
+        languageProfile,
+      )
 
-    const resolvedGroupBlocks =
-      rawGroupBlocks.length > 0
-        ? rawGroupBlocks
-        : toFallbackBlockLevelBlocks(
-            blocks,
-            candidate.preprocessingScale,
-            candidate.originalImageSize,
-            'group',
-          )
+      const resolvedGroupBlocks =
+        rawGroupBlocks.length > 0
+          ? rawGroupBlocks
+          : toFallbackBlockLevelBlocks(
+              blocks,
+              candidate.preprocessingScale,
+              candidate.originalImageSize,
+              'group',
+              languageProfile,
+            )
 
-    const resolvedLineBlocks =
-      rawLineBlocks.length > 0
-        ? rawLineBlocks
-        : toFallbackBlockLevelBlocks(
-            blocks,
-            candidate.preprocessingScale,
-            candidate.originalImageSize,
-            'line',
-          )
+      const resolvedLineBlocks =
+        rawLineBlocks.length > 0
+          ? rawLineBlocks
+          : toFallbackBlockLevelBlocks(
+              blocks,
+              candidate.preprocessingScale,
+              candidate.originalImageSize,
+              'line',
+              languageProfile,
+            )
 
-    results.push({
-      label: candidate.label,
-      text: normalizeExtractedText(data.text),
-      confidence: data.confidence ?? 0,
-      blocksByGranularity: {
+      const blocksByGranularity: OcrBlocksByGranularity = {
         group: normalizeBlocks(resolvedGroupBlocks, 'group'),
         line: normalizeBlocks(resolvedLineBlocks, 'line'),
-      },
-      imageSize: candidate.originalImageSize,
-    })
+      }
+
+      results.push({
+        label: candidate.label,
+        presetLabel: preset.label,
+        text: toDisplayText(blocksByGranularity, data.text, languageProfile),
+        confidence: clamp(data.confidence ?? 0, 0, 100),
+        blocksByGranularity,
+        imageSize: candidate.originalImageSize,
+      })
+    }
   }
 
-  results.sort((first, second) => toCandidateScore(second) - toCandidateScore(first))
+  results.sort(
+    (first, second) =>
+      toCandidateScore(second, languageProfile) - toCandidateScore(first, languageProfile),
+  )
 
   const bestResult = results[0]
+  const fallbackImageSize = candidates[0]?.originalImageSize ?? { width: 0, height: 0 }
 
   if (!bestResult) {
     return {
@@ -686,7 +1080,7 @@ export const extractJapaneseText = async (
         group: [],
         line: [],
       },
-      imageSize: { width: 0, height: 0 },
+      imageSize: fallbackImageSize,
     }
   }
 
@@ -697,12 +1091,26 @@ export const extractJapaneseText = async (
   }
 }
 
+export const extractJapaneseText = async (
+  file: File,
+): Promise<OcrExtractionResult> => {
+  return extractTextFromImage(file, {
+    language: 'japanese',
+  })
+}
+
 export const terminateOcrWorker = async (): Promise<void> => {
-  if (!workerPromise) {
+  const workerPromises = [...workerPromisesByLanguage.values()]
+  workerPromisesByLanguage.clear()
+
+  if (workerPromises.length === 0) {
     return
   }
 
-  const worker = await workerPromise
-  await worker.terminate()
-  workerPromise = null
+  await Promise.allSettled(
+    workerPromises.map(async (workerPromise) => {
+      const worker = await workerPromise
+      await worker.terminate()
+    }),
+  )
 }

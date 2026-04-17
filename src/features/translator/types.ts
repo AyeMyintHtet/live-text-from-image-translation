@@ -22,6 +22,8 @@ export type ImageDimensions = {
   height: number
 }
 
+export type OcrLanguage = 'english' | 'japanese'
+
 export type OcrGranularity = 'group' | 'line'
 
 export type OcrTextBlock = {

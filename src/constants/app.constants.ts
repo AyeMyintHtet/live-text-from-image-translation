@@ -1,15 +1,17 @@
+import type { OcrLanguage } from '@/features/translator/types'
+
 export const APP_COPY = {
   productName: 'Live Text From Image Translation',
-  productTagline: 'Extract Japanese webtoon dialogue and prepare it for English translation.',
+  productTagline: 'Extract dialogue from images and prepare it for English translation.',
   heroTitle: 'OCR + Translation Workspace',
   heroDescription:
-    'Upload a webtoon panel, run Japanese OCR, and generate an English draft. This foundation is built to plug in stronger translation providers later.',
+    'Upload a webtoon panel, run OCR with your selected language profile, and generate an English draft. This foundation is built to plug in stronger translation providers later.',
   sourcePanelTitle: 'Source Image',
   sourcePanelDescription:
     'Drop a screenshot or page crop. After OCR and translation, overlay text is anchored to detected bbox coordinates.',
-  ocrPanelTitle: 'Japanese OCR Result',
+  ocrPanelTitle: 'OCR Result',
   ocrPanelDescription:
-    'Tesseract.js reads horizontal and vertical Japanese text (`jpn + jpn_vert`).',
+    'Tesseract.js runs with the selected OCR language profile.',
   translationPanelTitle: 'English Output',
   translationPanelDescription:
     'Current build uses a safe placeholder translation adapter. Swap it with your real provider when ready.',
@@ -24,7 +26,25 @@ export const ACCEPTED_IMAGE_EXTENSIONS_LABEL = '.png, .jpg, .jpeg, .webp'
 
 export const MAX_IMAGE_SIZE_MB = 12
 
-export const OCR_LANGUAGE = 'jpn+jpn_vert'
+export const OCR_LANGUAGE_OPTIONS: ReadonlyArray<{
+  value: OcrLanguage
+  label: string
+  tesseractLanguage: string
+}> = [
+  {
+    value: 'english',
+    label: 'English (eng)',
+    tesseractLanguage: 'eng',
+  },
+  {
+    value: 'japanese',
+    label: 'Japanese (jpn + jpn_vert)',
+    tesseractLanguage: 'jpn+jpn_vert',
+  },
+] as const
+
+export const DEFAULT_OCR_LANGUAGE: OcrLanguage = 'english'
+export const DEFAULT_USE_HIGH_CONTRAST_PREPROCESSING = true
 
 export const STATUS_LABELS = {
   idle: 'Idle',
