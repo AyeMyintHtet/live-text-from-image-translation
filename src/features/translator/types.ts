@@ -23,6 +23,14 @@ export type ImageDimensions = {
 }
 
 export type OcrLanguage = 'english' | 'japanese'
+export type OcrEngine = 'tesseract' | 'mangaOcr'
+export type TranslationLanguage =
+  | 'english'
+  | 'japanese'
+  | 'korean'
+  | 'spanish'
+  | 'french'
+  | 'german'
 
 export type OcrGranularity = 'group' | 'line'
 

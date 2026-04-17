@@ -1,21 +1,29 @@
 import { create } from 'zustand'
 
 import {
+  DEFAULT_OCR_ENGINE,
   DEFAULT_OCR_LANGUAGE,
+  DEFAULT_TRANSLATION_TARGET_LANGUAGE,
   DEFAULT_USE_HIGH_CONTRAST_PREPROCESSING,
+  OCR_ENGINE_LANGUAGE_FALLBACKS,
+  OCR_LANGUAGE_TO_TRANSLATION_LANGUAGE,
+  isOcrEngineLanguageSupported,
+  isOcrEngineSupportsHighContrastPreprocessing,
 } from '@/constants/app.constants'
 import { extractTextFromImage } from '@/features/translator/services/ocr.service'
 import {
-  translateBlocksToEnglish,
-  translateToEnglish,
+  translateBlocks,
+  translateText,
 } from '@/features/translator/services/translation.service'
 import type {
   ImageDimensions,
   OcrBlocksByGranularity,
+  OcrEngine,
   OcrGranularity,
   OcrLanguage,
   OcrTextBlock,
   PerformanceMetrics,
+  TranslationLanguage,
   WorkflowStatus,
 } from '@/features/translator/types'
 
@@ -25,14 +33,18 @@ type TranslatorStore = {
   ocrText: string
   translatedText: string
   ocrBlocksByGranularity: OcrBlocksByGranularity
+  ocrEngine: OcrEngine
   ocrLanguage: OcrLanguage
+  translationTargetLanguage: TranslationLanguage
   useHighContrastPreprocessing: boolean
   overlayGranularity: OcrGranularity
   status: WorkflowStatus
   errorMessage: string | null
   metrics: PerformanceMetrics
   setSourceFile: (file: File | null) => void
+  setOcrEngine: (engine: OcrEngine) => void
   setOcrLanguage: (language: OcrLanguage) => void
+  setTranslationTargetLanguage: (language: TranslationLanguage) => void
   setUseHighContrastPreprocessing: (enabled: boolean) => void
   setOverlayGranularity: (granularity: OcrGranularity) => void
   setWorkflowError: (message: string) => void
@@ -85,9 +97,26 @@ const mergeTranslatedBlocks = (
   }))
 }
 
+const clearTranslatedBlocks = (
+  blocksByGranularity: OcrBlocksByGranularity,
+): OcrBlocksByGranularity => {
+  return {
+    group: blocksByGranularity.group.map((block) => ({
+      ...block,
+      translatedText: '',
+    })),
+    line: blocksByGranularity.line.map((block) => ({
+      ...block,
+      translatedText: '',
+    })),
+  }
+}
+
 export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
   sourceFile: null,
+  ocrEngine: DEFAULT_OCR_ENGINE,
   ocrLanguage: DEFAULT_OCR_LANGUAGE,
+  translationTargetLanguage: DEFAULT_TRANSLATION_TARGET_LANGUAGE,
   useHighContrastPreprocessing: DEFAULT_USE_HIGH_CONTRAST_PREPROCESSING,
   ...createInitialState(),
   setSourceFile: (file) => {
@@ -96,16 +125,49 @@ export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
       ...createInitialState(),
     })
   },
-  setOcrLanguage: (language) => {
+  setOcrEngine: (engine) => {
+    const currentLanguage = get().ocrLanguage
+    const nextLanguage = isOcrEngineLanguageSupported(engine, currentLanguage)
+      ? currentLanguage
+      : OCR_ENGINE_LANGUAGE_FALLBACKS[engine]
+    const nextUseHighContrast = isOcrEngineSupportsHighContrastPreprocessing(engine)
+      ? get().useHighContrastPreprocessing
+      : false
+
     set({
-      ocrLanguage: language,
+      ocrEngine: engine,
+      ocrLanguage: nextLanguage,
+      useHighContrastPreprocessing: nextUseHighContrast,
       ...createInitialState(),
       sourceFile: get().sourceFile,
     })
   },
-  setUseHighContrastPreprocessing: (enabled) => {
+  setOcrLanguage: (language) => {
+    const engine = get().ocrEngine
+    const nextLanguage = isOcrEngineLanguageSupported(engine, language)
+      ? language
+      : OCR_ENGINE_LANGUAGE_FALLBACKS[engine]
+
     set({
-      useHighContrastPreprocessing: enabled,
+      ocrLanguage: nextLanguage,
+      ...createInitialState(),
+      sourceFile: get().sourceFile,
+    })
+  },
+  setTranslationTargetLanguage: (language) => {
+    set({
+      translationTargetLanguage: language,
+      translatedText: '',
+      ocrBlocksByGranularity: clearTranslatedBlocks(get().ocrBlocksByGranularity),
+      errorMessage: null,
+    })
+  },
+  setUseHighContrastPreprocessing: (enabled) => {
+    const engine = get().ocrEngine
+    const nextEnabled = isOcrEngineSupportsHighContrastPreprocessing(engine) ? enabled : false
+
+    set({
+      useHighContrastPreprocessing: nextEnabled,
       ...createInitialState(),
       sourceFile: get().sourceFile,
     })
@@ -121,6 +183,7 @@ export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
   },
   runOcr: async () => {
     const sourceFile = get().sourceFile
+    const ocrEngine = get().ocrEngine
     const ocrLanguage = get().ocrLanguage
     const useHighContrastPreprocessing = get().useHighContrastPreprocessing
 
@@ -142,6 +205,7 @@ export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
 
     try {
       const extraction = await extractTextFromImage(sourceFile, {
+        engine: ocrEngine,
         language: ocrLanguage,
         useHighContrastPreprocessing,
       })
@@ -175,6 +239,8 @@ export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
   },
   runTranslation: async () => {
     const sourceText = get().ocrText
+    const sourceLanguage = OCR_LANGUAGE_TO_TRANSLATION_LANGUAGE[get().ocrLanguage]
+    const targetLanguage = get().translationTargetLanguage
     const sourceBlocksByGranularity = get().ocrBlocksByGranularity
     const sourceBlocks = flattenBlocks(sourceBlocksByGranularity)
     const fallbackBlockText = sourceBlocks
@@ -200,8 +266,16 @@ export const useTranslatorStore = create<TranslatorStore>((set, get) => ({
 
     try {
       const [translatedText, translatedBlocks] = await Promise.all([
-        translateToEnglish(sourceTextForTranslation),
-        translateBlocksToEnglish(sourceBlocks),
+        translateText({
+          text: sourceTextForTranslation,
+          sourceLanguage,
+          targetLanguage,
+        }),
+        translateBlocks({
+          blocks: sourceBlocks,
+          sourceLanguage,
+          targetLanguage,
+        }),
       ])
 
       const translatedTextById = new Map(

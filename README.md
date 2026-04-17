@@ -1,6 +1,6 @@
 # live-text-from-image-translation
 
-A React + Vite + Tailwind workspace for extracting Japanese webtoon text from images and preparing English translation output.
+A React + Vite + Tailwind workspace for extracting text from manga/screenshots and preparing translation output.
 
 ## Stack
 
@@ -8,7 +8,8 @@ A React + Vite + Tailwind workspace for extracting Japanese webtoon text from im
 - Vite 8
 - Tailwind CSS 4 (`@tailwindcss/vite`)
 - Zustand (feature state)
-- Tesseract.js 7 (OCR)
+- Tesseract.js 7 (browser OCR)
+- Optional Manga OCR server adapter (through HTTP endpoint)
 - `class-variance-authority` + `clsx` + `tailwind-merge` (DRY UI variants)
 
 ## Scripts
@@ -34,6 +35,7 @@ src/
     translator/
       components/
       services/
+        ocr/
       store/
       types.ts
   lib/
@@ -50,17 +52,48 @@ src/
 ## OCR and Translation Flow
 
 1. Upload an image in the source panel.
-2. Run OCR with Tesseract.js (`jpn + jpn_vert`) using multi-pass preprocessing and bbox extraction.
-3. Translate text using the translation adapter.
-4. Render translated overlays at OCR bbox locations using responsive scale-ratio alignment.
+2. Choose OCR engine + OCR language + preprocessing settings.
+3. Run OCR:
+   - `Tesseract (Browser)` supports English/Japanese with bbox extraction.
+   - `Manga OCR (Server)` supports Japanese via HTTP endpoint.
+4. Choose translation target language and run translation adapter.
+5. Render translated overlays at OCR bbox locations when OCR blocks are available.
 
 The translation service currently ships with a placeholder adapter so you can safely plug in your preferred provider later in:
 
 - `src/features/translator/services/translation.service.ts`
 - `src/features/translator/constants/sample-ocr-blocks.ts` includes sample bbox test data for overlay alignment checks.
 
+## Manga OCR Endpoint
+
+Local development includes a built-in `POST /api/manga-ocr` endpoint (served by Vite) so the Manga OCR engine works out of the box with `npm run dev`.
+
+If you want to use an external server instead, set:
+
+```bash
+VITE_MANGA_OCR_ENDPOINT=http://localhost:8000/api/manga-ocr
+```
+
+If this variable is unset, the app uses `/api/manga-ocr`.
+
+Expected response payload can be one of:
+
+- `{ "text": "..." }`
+- `{ "result": { "text": "..." } }`
+- `{ "lines": ["...", "..."] }`
+
+Request payloads accepted by the built-in endpoint:
+
+- `multipart/form-data` with `file` and optional `language` (`japanese` or `english`)
+- `application/json` with `imageBase64` and optional `language`
+
+Troubleshooting:
+
+- `Failed to fetch` with `VITE_MANGA_OCR_ENDPOINT` set usually means that server is not running or blocked by CORS.
+- Remove `VITE_MANGA_OCR_ENDPOINT` to fall back to the built-in local `/api/manga-ocr` endpoint.
+
 ## Next Production Steps
 
 - Add real translation provider and API key management.
-- Add speech bubble-level grouping/merging heuristics on top of OCR paragraph boxes.
+- Add bbox extraction to Manga OCR adapter (if your backend provides coordinates).
 - Add unit tests for store actions and service adapters.
